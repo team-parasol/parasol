@@ -1,0 +1,1428 @@
+--[[
+The View class is used to display data to the user in the form of tree structures, lists or groups.
+
+Items are created and stored as structured tables.
+
+Here is an example of a list of valid item structures.  Each attribute can potentially be a column in the display when
+using column mode.
+
+   { { id=1, group='file', path='parasol:system/', name='document.txt', size=1232, dateCreated='2018-08-02T17:14' },
+     { id=2, group='folder', path='parasol:system/', name='config', icon='category/name' }
+   }
+
+To build tree structures, arrange the items as seen in this example:
+
+  { { id='1', group='folder',
+      { id='1.1', group='folder',
+        { id=1.1.1', group='file' },
+        { ... }
+      }
+    },
+    { ... }
+  }
+
+   activeTag:      Refers to the most recent item to have its state altered.
+   columns:        Active columns for 'column mode' may be set via this field.
+   contextMenu:    Reference to a menu that will be displayed for contextual actions.
+   dateFormat:     Sets the format to use when displaying date types.
+   document:       If document mode is enabled, this field must refer to a Document object for data processing and display.
+   flags:
+   focus:          References the surface that must be used for user focus monitoring.
+   hScroll:        If scrolling is required, use this field to refer to a horizontal scroll bar.
+   highlightTag:   Refers to the current item that the user has highlighted.
+   itemNames:      Identifies the names of tags in the XML tree that must be treated as items.
+   maxItemWidth:   Limits item width when using the 'list' or 'longList' style.
+   selectedTag:    Indicates the tag index of the most recently selected item.
+   selectedTags:   Returns an array of tag indexes for all currently selected items.
+   selection:      Reflects the string content of the currently selected item.
+   selectionIndex: Indicates the index number of the currently selected item.
+   style:          Preset the view style (refer to view styles in this document)
+   textAttrib:     Declares the attribute to use as the main text when drawing the item.  Defaults to 'text'
+   totalItems:     The total number of items listed in the view.
+   totalSelected() The total number of currently selected items.
+   vScroll:        If scrolling is required, use this field to refer to a vertical scroll bar.
+   vSpacing:       Specifies the minimum amount of vertical whitespace that will distance each item within the view.
+   varDefault:     The default value to return when GetVar() fails.
+
+Callbacks:
+
+   expandCallback:  A callback for receiving notifications when tree branches are expanded.
+   selectionChange: The selected item has changed.
+   activeChange:    The active item has changed (includes reporting of deselection events)
+   cellClick:       A callback for receiving notifications of clicks in column cells.
+
+Graphics options:
+
+   borderOffset:  Sets the X, Y, XOffset and YOffset to a single value.
+   font:          Refers to the default font that renders text within the view.
+   gfxFlags:
+   groupFace:     The font to use for group headers when the GROUP_TREE style is enabled.
+   groupHeight:
+   hSpacing:      The minimum amount of horizontal white-space that will distance each item within the view.
+   iconFilter:    Sets the preferred icon filter.
+   iconSize:
+   iconTheme:
+
+   widthReset:
+   noSorting:
+   sensitive:
+   noIcons:
+   notifyOnClear:
+   dragDrop:
+   noSelect:
+   noSelectJmp:
+   userDrag:
+   autoDeselect:
+   multiSelect:
+
+View styles:
+
+   List:
+   Icon:
+   Tree:
+   Column:
+   LongList:
+   GroupTree:
+   Document:
+   ColumnTree:
+
+Graphics options:
+
+   OutlineTitle
+   NoBorder
+   DrawTable
+   GroupShadow
+   Stripes
+   Hairlines
+   Branches
+   AltGroup
+   LineBreaks
+
+--]]
+
+   require 'common'
+   require 'gui'
+
+gui.view = function(Options)
+   local mFont    = mod.load('font')
+   local mSurface = mod.load('surface')
+   local mGfx     = mod.load('display')
+   local mVector  = mod.load('vector')
+   local mIcon    = mod.load('iconserver')
+
+   local self = { -- Resources that require tracking
+      icons = { },
+      zones = { }
+   }
+
+   local lScene
+   local lDate = struct.new('DateTime')
+   local lItems = { } -- All items in their original appended order
+   local lColumns = { }
+   local lLookupCol = { } -- Lookup columns by ID
+   local lLookup = { } -- Lookup items by ID
+   local lOrder = { } -- Item references
+   local lActiveTag, lHighlightTag, lSelectedTag
+   local lTextAttrib = nz(Options.textAttrib, 'text')
+   local lIconSize = 16
+   local lRowEnd = 0
+   local lRowIndex = 0
+   local lGap = 2
+   local lImageCache = { } -- Replaces 'glCache' for storing images
+   local lColumnHeight = 12 + 6
+   local lStyle = nz(Options.style, 'LONGLIST'):upper()
+   local lGroupFace = 'open sans:12:bold'
+   local lThemeColour
+   local lLineHeight = gui.getFontHeight(gui.fonts.default) * 1.3
+   local lColBkgdHighlight  = { r=0,   g=0,   b=0,    a=10 }
+   local lColSelect         = { r=0,   g=0,   b=60,   a=140 }
+   local lColTitleFont      = { r=0, g=0, b=0,  a=200 }
+   local lColTitleSortFont  = { r=0, g=0, b=0,  a=255 }
+   local lColHairline       = { r=255, g=255, b=255,  a=0 }
+   local lColHighlight      = { r=0,   g=0,   b=0,    a=0 }
+   local lColSelectHairline = { r=255, g=255, b=255,  a=0 }
+   local lColSelectFont     = { r=255, g=255, b=255,  a=255 }
+   local lColItem           = { r=0,   g=0,   b=0,    a=255 }
+   local lColBackground     = { r=255, g=255, b=255,  a=255 }
+   local lColBorder         = { r=160, g=160, b=160,  a=255 }
+   local lButtonHighlight   = { r=0xf0, g=0xf0, b=0xf0, a=255 }
+   local lButtonShadow      = { r=0xd0, g=0xd0, b=0xd0, a=255 }
+   local lButtonBackground  = { r=0xf0, g=0xf0, b=0xf0, a=255 }
+   local lItemCounter = 1
+   local lCounter = 1
+   local lActiveZone
+
+   local rebuild, cursorRefresh, hoverUpdate -- Forward declared functions
+
+   local function counter()
+      lCounter = lCounter + 1
+      return lCounter
+   end
+
+   local function loadItems(Items)
+      if not Items then error('No Items provided') end
+
+      msg('Loading ' .. #Items .. ' items')
+
+      lItems = { }
+      lLookup = { }
+      for _, item in pairs(Items) do
+         local new_item = { _id=lItemCounter, _x=0, _y=0, _width=0, _height=0 }
+         for k, v in pairs(item) do
+            new_item[k] = v
+         end
+         table.insert(lItems, new_item)
+         lLookup[lItemCounter] = new_item
+         lItemCounter = lItemCounter + 1
+      end
+   end
+
+   -- Reasons for change:
+   --
+   --   inverted:  Item automatically deselected due to an invert operation.
+   --   moved:     The item has been deselected due to a movement operation.
+   --   user:      Selected by user interaction (click or keypress)
+   --   manual:    Item was manually selected (by the application, not the user).
+
+   local function reportItemSelected(Reason, Item)
+      if Options.itemSelected then
+         Options.itemSelected(self, Reason, Item)
+      end
+   end
+
+   local function reportItemDeselected(Reason, Item)
+      if Options.itemSelected then
+         Options.itemDeselected(self, Reason, Item)
+      end
+   end
+
+   local function reportItemActivated(Reason, Item)
+      if Options.itemActivated then
+         Options.itemActivated(self, Reason, Item)
+      end
+   end
+
+   local function reportActiveChange(Reason, Item)
+      if Options.activeChange then
+         Options.activeChange(self, Reason, Item)
+      end
+   end
+
+   local function getCursorItem(X, Y)
+      for _, item in pairs(lItems) do
+         if item._x then
+            if (X >= item._x) and (X < item._x + item._width) and (Y >= item._y) and (Y < item._y + item._height) then
+               return item
+            end
+         end
+      end
+   end
+
+   local function checkCursorImage()
+      if self.pointerLocked and not lActiveZone then
+         mGfx.restoreCursor(PTR_DEFAULT, self.surface)
+         self.pointerLocked = nil
+      end
+   end
+
+   local function loadIcon(Name)
+      local icon = { }
+      if not self.icons[Name] then
+         local err
+         err, icon.bmp = mIcon.createIcon(Name, nil, nil, nil, lIconSize)
+         icon.img = lScene.new('VectorImage', { bitmap = icon.bmp })
+         lScene.mtAddDef(Name, icon.img)
+         self.icons[Name] = icon
+      end
+      return self.icons[Name]
+   end
+
+   local function constructColumnBanner()
+      local width = self.layout.width
+      local margin = lLineHeight * 0.3
+
+      self.bannerHeight = lLineHeight * 1.3
+      if not self.col then self.col = { } end
+
+      -- Prepare vectors
+
+      if not self.col.viewport then
+         self.col.viewport = lPage.new('VectorViewport', {
+            x = 0, y = 0,
+            width = width, height = self.bannerHeight
+         })
+
+         self.col.bkgd = self.col.viewport.new('VectorRectangle', {
+            fill   = gui.rgbToSVG(lButtonBackground),
+            stroke = gui.rgbToSVG(lColBorder),
+            strokeWidth = 2,
+            x      = 0,
+            y      = 0,
+            width  = '100%',
+            height = '100%'
+         })
+
+         self.col.lines = self.col.viewport.new('VectorPath', {
+            stroke = gui.rgbToSVG(lColBorder),
+            strokeWidth = 1
+         })
+
+      else
+         self.col.viewport.width = width
+         self.col.lines.acClear()
+      end
+
+      -- Draw column text and separators
+
+      local pc = struct.new('PathCommand')
+      local x = 0
+      for _, col in pairs(lColumns) do
+         local width = col.width
+
+         if not col.vecViewport then
+            col.vecViewport = lPage.new('VectorViewport', {
+               x = x,
+               y = 0,
+               width = col.width,
+               height = self.layout.height
+            })
+         else
+            col.vecViewport.x = x
+            col.vecViewport.width = col.width
+         end
+
+         if not col.vecGradient then
+            col.vecGradientName = 'colGradient' .. counter()
+            if nz(col.align, 'left') == 'right' then
+               col.vecGradient = gui.simpleGradient(lScene, col.vecGradientName,
+                  { {r=0,g=0,b=0,a=0,offset=0.1 }, {r=0,g=0,b=0,a=255,offset=0.2}, {r=0,g=0,b=0,a=255,offset=1.0} },
+                  0, 0, col.width, 0, 'userspace')
+            else
+               col.vecGradient = gui.simpleGradient(lScene, col.vecGradientName,
+                  { {r=0,g=0,b=0,a=255,offset=0 }, {r=0,g=0,b=0,a=255,offset=0.9}, {r=0,g=0,b=0,a=0,offset=0.98} },
+                  0, 0, col.width, 0, 'userspace')
+            end
+         else
+            col.vecGradient.x2 = col.width
+         end
+
+         if not col.vecTitle then
+            col.vecTitle = col.vecViewport.new('VectorText', {
+               face     = gui.fonts.widget.face,
+               fontSize = string.format('%.2fpt', gui.fonts.widget.size),
+               align    = 'left'
+            })
+         end
+
+         if col.align == 'right' then
+            col.vecTitle.x = col.width - margin
+         else
+            col.vecTitle.x = margin
+         end
+
+         col.vecTitle.y      = lLineHeight -- - ((lLineHeight - gui.getFontHeight(gui.fonts.widget)))
+         col.vecTitle.string = nz(col['title'], 'Untitled')
+         if self.currentSort and col == self.currentSort.col then
+            col.vecTitle.fill = gui.rgbToSVG(lColTitleSortFont)
+         else
+            col.vecTitle.fill = gui.rgbToSVG(lColTitleFont)
+         end
+         col.vecTitle.align  = nz(col.align, 'left')
+
+         pc.type = PE_Move
+         pc.x = x + width
+         pc.y = 0
+         self.col.lines.mtAddCommand(pc)
+
+         pc.type = PE_Line
+         pc.x = x + width
+         pc.y = self.bannerHeight
+         self.col.lines.mtAddCommand(pc)
+
+         -- Create a zone for sorting the column when clicked
+
+         table.insert(self.zones, {
+            x      = x + 2,
+            y      = 0,
+            width  = col.width - 4,
+            height = self.bannerHeight,
+            col    = col,
+            hoverCallback = function(Zone, X, Y)
+               self.hoveredItem = {
+                  column = col,
+                  click = function(Input)
+                     if Input.value == 1 then return end
+
+                     if self.currentSort and self.currentSort.icon then
+                        self.currentSort.icon.acFree()
+                        self.currentSort.icon = nil
+                     end
+
+                     if self.currentSort and self.currentSort.col == col and self.currentSort.ascending == true then
+                        self.currentSort = { col=col, ascending=false }
+                        if not self.iconDescending then
+                           loadIcon('layout/sort_alpha_desc')
+                           self.currentSort.icon = col.vecViewport.new('VectorRectangle', {
+                              fill   = 'url(#layout/sort_alpha_desc)',
+                              y      = self.layout.topMargin + ((lLineHeight - lIconSize) * 0.5),
+                              width  = lIconSize,
+                              height = lIconSize
+                           })
+                        end
+                     else
+                        self.currentSort = { col=col, ascending=true }
+                        if not self.iconAscending then
+                           loadIcon('layout/sort_alpha_asc')
+                           self.currentSort.icon = col.vecViewport.new('VectorRectangle', {
+                              fill   = 'url(#layout/sort_alpha_asc)',
+                              y      = self.layout.topMargin + ((lLineHeight - lIconSize) * 0.5),
+                              width  = lIconSize,
+                              height = lIconSize
+                           })
+                        end
+                     end
+
+                     if col.align == 'right' then
+                        self.currentSort.icon.x = margin
+                     else
+                        self.currentSort.icon.x = col.width - margin - lIconSize
+                     end
+
+                     self.sortColumn(col, self.currentSort.ascending)
+                  end
+               }
+            end
+         })
+
+         -- Resizable separator
+
+         table.insert(self.zones, {
+            x      = x + col.width - 2,
+            y      = 0,
+            width  = 4,
+            height = self.bannerHeight,
+            col    = col,
+            hoverCallback = function(Zone, X, Y)
+               self.hoveredItem = {
+                  column = col,
+                  click = function(Input)
+                     if Input.value == 1 then
+                        lActiveZone = Zone
+                        Zone.origColWidth = col.width
+                     end
+                  end
+               }
+
+               if not self.pointerLocked then
+                  if mGfx.SetCursor(0, CRF_LMB, PTR_SPLIT_HORIZONTAL, 0, self.surface) == ERR_Okay then
+                     self.pointerLocked = PTR_SPLIT_HORIZONTAL
+                  end
+               end
+               return true
+            end,
+            clickMove = function(Input)
+               col.width = lActiveZone.origColWidth + (Input.x - self.clickX)
+               if col.width < 6 then col.width = 6 end
+               rebuild()
+               self.surface.acDraw()
+            end
+         })
+
+         x = x + width
+      end
+   end
+
+   local function columnText(Value, Type)
+      if Type == 'bytesize' then
+         Value = tonumber(Value)
+         if Value < 1024 then
+            return string.format('%.0f', Value)
+         elseif Value < 1048576 then
+            return string.format('%.0f KB', Value / 1024)
+         elseif Value < 1073741824 then
+            Value = Value / 1048576
+            if Value >= 10 then
+               return string.format('%.0f MB', Value)
+            else
+               return string.format('%.1f MB', Value)
+            end
+         else
+            return string.format('%.1f GB', Value / 1073741824)
+         end
+      elseif Type == 'date' then
+         local err = mSys.StrReadDate(Value, lDate)
+         if err == ERR_Okay then
+            return string.format('%4d-%02d-%02d %02d:%02d', lDate.year, lDate.month, lDate.day, lDate.hour, lDate.minute)
+         end
+      elseif Type == 'numeric' then
+         return string.format('%d', tonumber(Value))
+      elseif Type == 'seconds' then
+         Value = tonumber(Value)
+         local min = Value / 60
+         local sec = Value % 60
+         return string.format('%d:%.2d', min, sec)
+      elseif Type == 'float' then
+         return string.format('%.3f', tonumber(Value))
+      end
+
+      return Value
+   end
+
+   -- Generate graphics for items in a columnar view.  This function is called recursively if the style
+   -- is a ColumnTree with open branches.
+
+   local function constructColumnView(Items)
+      local width  = self.layout.width - self.layout.leftMargin - self.layout.rightMargin
+      local height = self.layout.height
+      local x = self.layout.leftMargin
+      local y = self.bannerHeight
+      local index = 0
+      for _, item in pairs(lItems) do
+         index = index + 1
+
+         if not item._vectors then item._vectors = { } end
+         if not item._col then item._col = { } end
+
+         item._x = x
+         item._y = y
+         item._width  = width
+         item._height = lLineHeight
+         if not item.lineOffset then
+            item._lineOffset = lLineHeight - ((lLineHeight - gui.getFontHeight(gui.fonts.widget)) * 0.5)
+         end
+
+         if not item._vectors.viewport then
+            item._vectors.viewport = lPage.new('VectorViewport', {
+               x = x, y = y + self.layout.topMargin,
+               width = width, height = lLineHeight
+            })
+         else
+            item._vectors.viewport.x = x
+            item._vectors.viewport.y = y + self.layout.topMargin
+            item._vectors.viewport.width = width
+            item._vectors.viewport.height = lLineHeight
+         end
+
+         local vp = item._vectors.viewport
+
+         -- If the item is hovered, create a highlight for it.  ColBkgdHighlight defines the background colour to use
+         -- when an item is highlighted.  If an item is also marked as selected, then the final colour is interpolated
+         -- with ColSelect.
+
+         local bkgd
+         if item == lHighlightTag then
+            if lColBkgdHighlight then
+               if item._selected then
+                  bkgd = gui.interpolateRGB(lColBkgdHighlight, lColSelect)
+               else
+                  bkgd = lColBkgdHighlight
+               end
+            elseif item._selected then
+               bkgd = lColSelect
+            end
+
+            if lColHighlight.a > 0 then bkgd = lColHighlight end
+         elseif item._selected then
+            if lColSelect.a > 0 then bkgd = lColSelect end
+         end
+
+         if bkgd then
+            if not item._vectors.highlight then
+               item._vectors.highlight = vp.new('VectorRectangle', {
+                  fill = gui.rgbToSVG(bkgd), x = 0, y = 0, roundX = 4, roundY = 4, width = width, height = lLineHeight
+               })
+            else
+               item._vectors.highlight.fill = gui.rgbToSVG(bkgd)
+               item._vectors.highlight.visibility = 'visible'
+            end
+            item._vectors.highlight.width = width
+            item._vectors.highlight.height = lLineHeight
+            item._vectors.highlight.mtPush(-255)
+         elseif item._vectors.highlight then
+            item._vectors.highlight.visibility = 'hidden'
+         end
+
+         local alpha = 1.0
+         if bit.band(self.surface.flags, RNF_DISABLED) != 0 then
+            alpha = 0.5
+         end
+
+         local cx = 0
+         local margin = lLineHeight * 0.2
+         for _, col in pairs(lColumns) do
+            local iconMargin = 0
+            local attrib = col.attrib
+
+            if not item._col[attrib] then item._col[attrib] = { } end
+
+            if col.showIcons and item.icon then
+               catch(function()
+                  local icon = { }
+
+                  if not self.icons[item.icon] then
+                     local err
+                     err, icon.bmp = mIcon.createIcon(item.icon, nil, nil, nil, lIconSize)
+                     icon.img = lScene.new('VectorImage', { bitmap = icon.bmp })
+                     lScene.mtAddDef(item.icon, icon.img)
+                     self.icons[item.icon] = icon
+                  end
+
+                  if not item._vectors.iconImage then
+                     item._vectors.iconImage = col.vecViewport.new('VectorRectangle', {
+                        fill   = 'url(#' .. item.icon .. ')',
+                        x      = x + margin,
+                        y      = self.layout.topMargin + y + ((lLineHeight - lIconSize) * 0.5),
+                        width  = lIconSize,
+                        height = lIconSize
+                     })
+                  else
+                     item._vectors.iconImage.x = x + margin
+                     item._vectors.iconImage.y = self.layout.topMargin + y + ((lLineHeight - lIconSize) * 0.5)
+                  end
+               end,
+               function(Exception)
+                  print('Failed to process icon ' .. item.icon .. ', error ' .. Exception.message)
+               end)
+               iconMargin = margin + lIconSize + margin
+            end
+
+            if nz(item[attrib]) then
+               if not item._col[attrib].text then
+                  item._col[attrib].text = col.vecViewport.new('VectorText', {
+                     face     = gui.fonts.widget.face,
+                     fontSize = string.format('%.2fpt', gui.fonts.widget.size),
+                     align    = nz(col.align, 'left')
+                  })
+               end
+
+               if col.align == 'right' then
+                  item._col[attrib].text.x = x + col.width - margin
+               else
+                  item._col[attrib].text.x = x + iconMargin
+               end
+               item._col[attrib].text.y = y + item._lineOffset
+               item._col[attrib].text.string = columnText(item[attrib], col.type)
+               --font.wrapEdge = x + item.Width
+
+               local base = nz(item.colour, lColItem)
+               if item._selected then
+                  if lColSelectFont.a > 0 then
+                     base = lColSelectFont
+                  end
+               elseif item.index == lHighlightTag and lColHighlight.a > 0 then
+                  base = lColHighlight
+               end
+
+               item._col[attrib].text.fill =  'url(#' .. col.vecGradientName .. ')' -- gui.rgbToSVG({ r=base.r, g=base.g, b=base.b, a=base.a*alpha })
+            end
+
+            table.insert(self.zones, {
+               x      = item._x,
+               y      = item._y,
+               width  = item._width,
+               height = item._height,
+               hoverCallback = function(Zone, X, Y)
+                  if item != lHighlightTag then
+                     hoverUpdate(item)
+                  end
+
+                  self.hoveredItem = {
+                     click = function(Input)
+                        if Input.value == 0 and bit.band(Input.flags, JTYPE_DBL_CLICK) != 0 then
+                           print('ACTIVATED')
+                        end
+
+                        print('Hovered ', item)
+                     end
+                  }
+               end
+            })
+
+            cx = cx + col.width
+         end
+
+         y = y + lLineHeight + lGap
+      end
+
+      for _, col in pairs(lColumns) do
+         col.vecViewport.mtPush(255)
+      end
+--[[
+            if (col->Type IS CT_CHECKBOX) then
+               if (buffer[0]) then
+                  checked = StrToInt(buffer)
+                  if ((!checked) AND ((buffer[0] IS 'y') OR (buffer[0] IS 'Y'))) then
+                     checked = 1
+                  end
+               else
+                  checked = 0
+               end
+
+               if not glTick and not tick_error then
+                  objPicture **ptr;
+                  if (KeyGet(glCache, KEY_TICK, &ptr, NULL) != ERR_Okay) then
+                     if (!(tick_error = CreateObject(ID_PICTURE, 0, &glTick,
+                           FID_Path|TSTR,   "templates:images/tick",
+                           FID_Flags|TLONG, PCF_FORCE_ALPHA_32,
+                           TAGEND))) then
+                        SetOwner(glTick, modWidget);
+                        KeySet(glCache, KEY_TICK, &glTick, sizeof(objPicture **));
+                     end
+                  else
+                     glTick = ptr[0]
+                  end
+               end
+
+               if not glTick or lLineHeight < glTick->Bitmap->Height+2 then
+                  if (csize = lLineHeight - 2) >= 6 then
+                     local colour
+                     if (checked) colour = bmpGetColour(Bitmap, 0, 0, 0, 255)
+                     else  colour = bmpGetColour(Bitmap, 0, 0, 0, 128)
+
+                     tx = 0
+                     ty = csize * 0.75
+                     tx2 = csize * 0.25
+                     ty2 = csize
+                     gfxDrawLine(tx, ty, tx2, ty2, colour)
+                     gfxDrawLine(tx, ty-1, tx2, ty2-1, colour)
+
+                     tx = tx2
+                     ty = ty2
+                     tx2 = csize
+                     ty2 = csize * 0.25
+                     gfxDrawLine(tx, ty, tx2, ty2, colour)
+                     gfxDrawLine(tx, ty-1, tx2, ty2-1, colour)
+                  end
+               else
+                  if (checked) glTick->Bitmap->Opacity = 255
+                  else glTick->Bitmap->Opacity = 40
+
+                  cx = x + ((col->Width - glTick->Bitmap->Width)/2)
+                  cy = y + ((lLineHeight - glTick->Bitmap->Height)/2)
+                  gfxCopyArea(glTick->Bitmap, Bitmap, BAF_BLEND, 0, 0, glTick->Bitmap->Width, glTick->Bitmap->Height, cx, cy)
+               end
+
+               continue
+            end
+--]]
+   end
+
+   -- In group-tree mode, all the items at the root of the tree get their own title-bar and their children are displayed as trees.
+--[[
+   local function initVectorGroupTree()
+      local iconbmp
+      local ny, ix, ey
+      local alt
+
+      if lColBackground.a > 0 then
+         gfxDrawRectangle(ax, ay, awidth, aheight, PackPixelRGBA(Bitmap, &lColBackground), BAF_BLEND|BAF_FILL)
+      end
+
+      if #lItems < 1 then return end
+
+      --if (!(expand = get_expand_bitmap())) goto exit
+      --if (!(collapse = get_collapse_bitmap())) goto exit
+
+      local ny = ay
+      local ey = ay
+      local alt = 0
+      for _, tag in pairs(lItems) do
+         ny = ay + tag.Y
+         ey = tag.Y + tag.Height
+
+         if tag._open then
+            drawTree(Surface, Bitmap, tag.child, &ey)
+            if tag._open and lGroupShadow then
+               drawShadow(Bitmap, ny+tag.Height)
+            end
+         end
+
+         local groupbmp
+         if lAltGroup then -- Group graphic - button style background
+            alt = not alt
+            if alt then
+               groupbmp = lGroupBitmap
+            else
+               groupbmp = lSelectBitmap
+            end
+         else
+            if tag._open then
+                groupbmp = lSelectBitmap ? lSelectBitmap : lGroupBitmap
+            else
+               groupbmp = lGroupBitmap ? lGroupBitmap : lSelectBitmap
+            end
+         end
+
+         if groupbmp then -- Tiled background
+            for ix=ax, ix < ax+awidth, ix += groupbmp.Width do
+               gfxCopyArea(groupbmp, Bitmap, 0, 0, 0, groupbmp.Width, tag.Height, ix, ny)
+            end
+         elseif tag._open then
+            gfxDrawRectangle(ax, ny, awidth, tag.Height, PackPixel(Bitmap,180,180,200), BAF_FILL)
+            gfxDrawRectangle(ax, ny, awidth, 1, PackPixel(Bitmap,200,200,220), BAF_FILL)
+            gfxDrawRectangle(ax, ny+tag.Height-1, awidth, 1, PackPixel(Bitmap,120,120,140), BAF_FILL)
+         else
+            gfxDrawRectangle(ax, ny, awidth, tag.Height, PackPixel(Bitmap,160,160,180), BAF_FILL)
+            gfxDrawRectangle(ax, ny, awidth, 1, PackPixel(Bitmap,180,180,200), BAF_FILL)
+            gfxDrawRectangle(ax, ny+tag.Height-1, awidth, 1, PackPixel(Bitmap,140,140,150), BAF_FILL)
+         end
+
+         -- Draw group icon and title
+
+         ix = ax + 3
+         if tag.icon then
+
+            if (tag._open or tag._selected) and tag._iconOpen then
+               iconbmp = tag._iconOpen
+            else
+               iconbmp = tag._icon
+            end
+
+            if bit.band(Surface.flags, RNF_DISABLED) != 0 then
+               iconbmp.opacity = 128
+            end
+
+            gfxCopyArea(iconbmp, Bitmap, BAF_BLEND, 0, 0, iconbmp.Width, iconbmp.Height,
+               ix + ((tag.height - iconbmp.Width)/2),
+               ny + ((tag.height - iconbmp.Height)/2))
+
+            ix = ix + tag.height + 4
+         else
+            ix = ix + 4
+         end
+
+         if tag.title then
+            lPage.new('VectorText', {
+               x      = ix,
+               y      = ny,
+               face   = lGroupFace,
+               fill   = lColTitleFont,
+               string = tag.title
+            })
+         end
+      end
+
+      -- Darken any unused area at the bottom of the group view
+
+      if lColGroupShade.a then
+         ey = ey + ay
+         gfxDrawRectangle(Bitmap, ax, ey, awidth, ay + aheight - ey, PackPixelRGBA(Bitmap, &lColGroupShade), BAF_BLEND|BAF_FILL)
+      end
+   end
+--]]
+
+   local function constructListView()
+      local width = self.layout.width - self.layout.leftMargin - self.layout.rightMargin
+      local height = self.layout.height
+      local x = self.layout.leftMargin
+      local y = 0
+      local index = 0
+      for _, tag in pairs(lItems) do
+         index = index + 1
+
+         if not tag._vectors then tag._vectors = { } end
+
+         tag._x = x
+         tag._y = y
+         tag._width  = width
+         tag._height = lLineHeight
+
+         if not tag._vectors.viewport then
+            tag._vectors.viewport = lPage.new('VectorViewport', {
+               x = x, y = y + self.layout.topMargin,
+               width = width, height = lLineHeight
+            })
+         else
+            tag._vectors.viewport.width = width
+            tag._vectors.viewport.height = lLineHeight
+         end
+
+         local vp = tag._vectors.viewport
+
+         -- If the item is hovered, create a highlight for it.  ColBkgdHighlight defines the background colour to use
+         -- when an item is highlighted.  If an item is also marked as selected, then the final colour is interpolated
+         -- with ColSelect.
+
+         local bkgd
+         if tag == lHighlightTag then
+            if lColBkgdHighlight then
+               if tag._selected then
+                  bkgd = gui.interpolateRGB(lColBkgdHighlight, lColSelect)
+               else
+                  bkgd = lColBkgdHighlight
+               end
+            elseif tag._selected then
+               bkgd = lColSelect
+            end
+
+            if lColHighlight.a > 0 then bkgd = lColHighlight end
+         elseif tag._selected then
+            if lColSelect.a > 0 then bkgd = lColSelect end
+         end
+
+         if bkgd then
+            if not tag._vectors.highlight then
+               tag._vectors.highlight = vp.new('VectorRectangle', {
+                  fill = gui.rgbToSVG(bkgd), x = 0, y = 0, roundX = 4, roundY = 4, width = width, height = lLineHeight
+               })
+            else
+               tag._vectors.highlight.fill = gui.rgbToSVG(bkgd)
+               tag._vectors.highlight.visibility = 'visible'
+            end
+            tag._vectors.highlight.width = width
+            tag._vectors.highlight.height = lLineHeight
+            tag._vectors.highlight.mtPush(-255)
+         elseif tag._vectors.highlight then
+            tag._vectors.highlight.visibility = 'hidden'
+         end
+
+         local alpha = 1.0
+         if bit.band(self.surface.flags, RNF_DISABLED) != 0 then
+            alpha = 0.5
+         end
+
+         local iconMargin = (lLineHeight * 0.2) + lIconSize + 4
+
+         if tag.icon then
+            catch(function()
+               local icon = { }
+
+               if not self.icons[tag.icon] then
+                  local err
+                  err, icon.bmp = mIcon.createIcon(tag.icon, nil, nil, nil, lIconSize)
+                  icon.img = lScene.new('VectorImage', { bitmap = icon.bmp })
+                  lScene.mtAddDef(tag.icon, icon.img)
+                  self.icons[tag.icon] = icon
+               end
+
+               if not tag._vectors.iconImage then
+                  tag._vectors.iconImage = vp.new('VectorRectangle', {
+                     fill   = 'url(#' .. tag.icon .. ')',
+                     x      = lLineHeight * 0.2,
+                     y      = ((lLineHeight - lIconSize) * 0.5),
+                     width  = lIconSize,
+                     height = lIconSize
+                  })
+               end
+            end,
+            function(Exception)
+               print('Failed to process icon ' .. tag.icon .. ', error ' .. Exception.message)
+            end)
+         end
+
+         if nz(tag[lTextAttrib]) then
+            if not tag._vectors.text then
+               tag._vectors.text = vp.new('VectorText', {
+                  face     = gui.fonts.widget.face,
+                  fontSize = string.format('%.2fpt', gui.fonts.widget.size),
+                  align    = 'left'
+               })
+            end
+
+            tag._vectors.text.x = iconMargin
+            tag._vectors.text.y = lLineHeight - ((lLineHeight - gui.getFontHeight(gui.fonts.widget)))
+            tag._vectors.text.string = tag[lTextAttrib]
+            --font.wrapEdge = x + tag.Width
+
+            local base = nz(tag.colour, lColItem)
+            if tag._selected then
+               if lColSelectFont.a > 0 then
+                  base = lColSelectFont
+               end
+            elseif tag.index == lHighlightTag and lColHighlight.a > 0 then
+               base = lColHighlight
+            end
+
+            tag._vectors.text.fill = gui.rgbToSVG({ r=base.r, g=base.g, b=base.b, a=base.a*alpha })
+         end
+
+         y = y + lLineHeight + lGap
+      end
+   end
+
+   rebuild = function()
+      if not lScene then return end
+
+      self.zones = { }
+      self.hoveredItem = { }
+
+      if lStyle == 'GROUPTREE' then
+         constructGroupTreeView()
+      elseif lStyle == 'TREE' then
+      elseif lStyle == 'LIST' or lStyle == 'LONGLIST' then
+         constructListView()
+      elseif lStyle == 'ICON' then
+         constructIconView()
+      elseif lStyle == 'COLUMNTREE' then
+         constructColumnBanner()
+--[[
+         if #lItems < 1 then return end
+
+         drawTree()
+         constructColumnView()
+--]]
+      elseif lStyle == 'COLUMN' then
+         constructColumnBanner()
+         constructColumnView()
+      end
+
+      cursorRefresh()
+   end
+
+   local function initVectorScene()
+      lScene    = obj.new('VectorScene', { })
+      lViewport = lScene.new('VectorViewport', { }) -- Main viewport for vector graphics.
+      lPage     = lViewport.new('VectorGroup', { })
+
+      self.bkgd = lPage.new('VectorRectangle', {
+         fill   = gui.rgbToSVG(lColBackground),
+         stroke = gui.rgbToSVG(lColBorder),
+         strokeWidth = 1,
+         x      = 0.5,
+         y      = 0.5,
+         width  = '100%', -- self.layout.width - 0.5
+         height = '100%'  -- self.layout.height - 0.5
+      })
+
+      rebuild()
+   end
+
+   hoverUpdate = function(Item) // Highlight items that the user hovers over.
+      if lHighlightTag == Item then return end
+      lHighlightTag = Item
+      rebuild()
+      self.surface.acDraw()
+   end
+
+   cursorRefresh = function()
+      local item, cursor
+
+      if not lActiveZone then
+         if self.cursorX then
+            for _, zone in pairs(self.zones) do
+               if self.cursorX >= zone.x and self.cursorX < zone.x + zone.width and
+                  self.cursorY >= zone.y and self.cursorY < zone.y + zone.height then
+                  cursor = zone.hoverCallback(zone, self.cursorX, self.cursorY)
+                  break
+               end
+            end
+         end
+
+         if not cursor then checkCursorImage() end
+      end
+   end
+
+   self.disable = function()
+      self.surface.acDisable()
+   end
+
+   self.enable = function()
+      self.surface.acEnable()
+   end
+
+   -- Clears a view of all internal content and updates the display.
+
+   self.clear = function()
+      local activate = false
+      if lSelectedTag then
+         reportItemDeselected('clear', lSelectedTag)
+         activate = true
+      end
+
+      if lActiveTag then
+         reportActiveChange('clear', lActiveTag)
+      end
+
+      self.scrollPos = { 0, 0 }
+      lHighlightTag = nil
+      lActiveTag    = nil
+      lSelectedTag  = nil
+
+      for _, item in pairs(lItems) do
+         unloadIcon(item._iconKey)
+         unloadIcon(item._iconOpenKey)
+      end
+
+      loadItems({ })
+      rebuild()
+
+      --if activate and Options.notifyOnClear or Options.sensitive then
+         --acActivate(Self) -- Call some equivalent for Fluid version
+      --end
+   end
+
+   -- Closes open tree branches.
+
+   self.closeBranch = function(ID)
+      local item = lLookup[ID]
+      if item._openBranch then
+         item._openBranch = false
+         arrangeItems()
+      end
+   end
+
+   -- Inserts new items into the view's tree structure.
+
+   self.insertItem = function(Item, PrevItem)
+      print('insertItem() not supported yet')
+   end
+
+   -- Inverts all currently selected items in the view.
+
+   self.invertSelection = function()
+      if lSensitive then return end
+
+      for _, item in ipairs(lItems) do
+         item._selected = not item._selected
+      end
+
+      lActiveTag = nil
+      lHighlightTag = nil
+
+      -- Determine the 'primary' selected item
+
+      lSelectedTag = nil
+      for _, item in ipairs(lItems) do
+         if item._selected then
+            lSelectedTag = item
+            reportItemSelected('inverted', item)
+            break
+         end
+      end
+
+      if not lSelectedTag then
+         reportItemDeselected('inverted', nil)
+      end
+
+      self.surface.acDraw()
+   end
+
+   -- Returns the graphical dimensions of an item in the view.
+
+   self.itemDimensions = function(Item)
+      return { x=0, y=0, width=0, height=0 }
+   end
+
+   -- Moves an item towards the bottom of the view.
+
+   self.lowerItem = function(XPath, Item)
+
+   end
+
+   -- Automate the expansion of closed tree branches
+
+   self.openBranch = function(XPath, Item, Parents)
+
+   end
+
+   -- Moves an item towards the top of the view.
+
+   self.raiseItem = function(XPath, Item)
+
+   end
+
+   -- Removes an item from the view.
+
+   self.removeItem = function(XPath, Item, InvisibleRemoval)
+
+   end
+
+   -- Checks the visibility of an item, scrolling it into view if it is partially or fully hidden.
+
+   self.revealItem = function(Item)
+
+   end
+
+   -- Manually scroll the page
+
+   self.scrollToPoint = function(X, Y)
+
+   end
+
+   -- Selects all items in the view for the user.
+
+   self.selectAll = function()
+      for _, item in ipairs(lItems) do
+         item._selected = true
+      end
+
+      lHighlightTag = nil
+      lActiveTag    = lItems[1]
+      lSelectedTag  = lItems[1]
+      reportItemSelected('selected', lItems[1])
+      reportActiveChange('selected', lItems[1])
+
+      self.surface.acDraw()
+   end
+
+   -- Manually select items for the user.
+
+   self.selectItem = function(XPath)
+
+   end
+
+   -- Deselects all currently selected items.
+
+   self.selectNone = function()
+      for _, item in ipairs(lItems) do
+         item._selected = false
+      end
+
+      lHighlightTag = nil
+      lActiveTag    = nil
+      lSelectedTag  = nil
+      reportItemDeselected('deselected', lItems[1])
+      reportActiveChange('deselected', lItems[1])
+
+      self.surface.acDraw()
+   end
+
+   self.setColumns = function(Columns)
+      msg('Loading ' .. #Columns .. ' columns')
+
+      for _, col in pairs(lColumns) do
+         if col.vecViewport then col.vecViewport.acFree() end
+         if col.vecGradient then col.vecGradient.acFree() end
+         if col.vecTitle then col.vecTitle.acFree() end
+      end
+
+      local c = 1
+      lColumns = { }
+      lLookupCol = { }
+      for _, item in pairs(Columns) do
+         local new_col = { _index=c, width=100, title='Untitled' }
+         for k, v in pairs(item) do
+            new_col[k] = v
+         end
+         table.insert(lColumns, new_col)
+         lLookupCol[c] = new_col
+         c = c + 1
+      end
+
+      rebuild()
+   end
+
+   -- Changes the attributes of any item in the view.
+
+   self.setItem = function(XPath, TagIndex, Key, Value)
+
+   end
+
+   self.loadItems = function(Items)
+      loadItems(Items)
+      rebuild()
+   end
+
+   -- Sorts the view by column (name or index).
+
+   self.sortColumn = function(Column, Ascending)
+      if type(Column) == 'string' then
+         for _, col in pairs(lColumns) do
+            if col['attrib'] == Column then
+               Column = col
+               break
+            end
+         end
+      elseif type(Column) == 'number' then
+         Column = lColumns[Column]
+      end
+
+      if type(Column) == 'table' then
+         -- NB: Attrib values that evaluate to nil are not permitted/supported.
+         local attrib = Column['attrib']
+         table.sort(lItems, function(a,b)
+            if Ascending then
+               return a[attrib] < b[attrib]
+            else
+               return a[attrib] >= b[attrib]
+            end
+         end)
+
+         rebuild()
+         self.surface.acDraw()
+      end
+   end
+
+   self.sort = function()
+   end
+
+   catch(function()
+      if Options.theme == 'light' then
+         lThemeColour = { first={ r=250,g=249,b=248 }, last={ r=210,g=211,b=212 } }
+      else
+         lThemeColour = { first={ r=90,g=90,b=90 }, last={ r=70,g=70,b=110 } }
+      end
+
+      self.layout = obj.new('layout')
+      self.layout.surface = Options.target
+      self.surface = Options.target
+
+      if Options.x then self.layout.x = Options.x end
+      if Options.y then self.layout.y = Options.y end
+      if Options.xOffset then self.layout.xOffset = Options.xOffset end
+      if Options.yOffset then self.layout.yOffset = Options.yOffset end
+      if Options.width then self.layout.width = Options.width end
+      if Options.height then self.layout.height = Options.height end
+
+      self.layout.topMargin    = 4
+      self.layout.bottomMargin = 4
+      self.layout.rightMargin  = 4
+      self.layout.leftMargin   = 4
+
+      self.layout.drawCallback = function(Surface, Bitmap)
+         if lScene then
+            lScene.bitmap = Bitmap
+            lScene.pageWidth = Surface.width
+            lScene.pageHeight = Surface.height
+            lScene.acDraw()
+         end
+      end
+
+      self.layout.resizeCallback = function(Surface)
+         rebuild()
+      end
+
+      if self.layout.acInit() != ERR_Okay then error('Failed to initialise surface.') end
+
+      self.layout.subscribe('free', function(Surface, Args)
+         self.layout = nil
+      end)
+
+      self.layout.surface.subscribe('focus', function(Surface, Args)
+
+      end)
+
+      self.layout.surface.subscribe('lostfocus', function(Surface, Args)
+
+      end)
+
+      -- Either use a provided scrollbar widget, or create new ones
+
+      self.hScroll = Options.hScroll
+      if not self.hScroll then
+         self.hScroll = obj.new('scrollbar', {
+            name      = 'sbh',
+            surface   = self.layout.surface,
+            x         = 0,
+            xOffset   = 0,
+            yOffset   = 0,
+            direction = 'horizontal'
+         })
+      end
+
+      self.vScroll = Options.vScroll
+      if not self.vScroll then
+         self.vScroll = obj.new('scrollbar', {
+            name      = 'sbv',
+            surface   = self.surface,
+            xOffset   = 0,
+            yOffset   = 0,
+            y         = 0,
+            direction = 'vertical'
+         })
+      end
+
+      if self.focus and bit.band(self.focus.flags, RNF_HAS_FOCUS) != 0 then
+         input.keyboard(self.surface, function(Input, Surface, Flags, Code, Unicode)
+            if bit.band(Flags, KQ_PRESSED) != 0 then
+               if (Code == K_ENTER) or (Code == K_NP_ENTER) or (Code == K_SPACE) then
+                  sendFeedback()
+               elseif (Code == K_UP) or (Code == K_LEFT) then
+                  if (lHighlightTag) then
+                     local scan = lHighlightTag.prev
+                     while (scan) and (scan.type != TI_ICON) do
+                        scan = scan.prev
+                     end
+                     if (not scan) then scan = lastIcon() end
+                     highlightItem(scan)
+                  else
+                     highlightItem(lItems)
+                  end
+               elseif (Code == K_DOWN) or (Code == K_RIGHT) then
+                  if lHighlightTag then
+                     local scan = lHighlightTag.next
+                     while (scan) and (scan.type != TI_ICON) do
+                        scan = scan.next
+                     end
+                     if not scan then scan = lItems end
+                     highlightItem(scan)
+                  else
+                     highlightItem(lItems)
+                  end
+               end
+            end
+         end)
+      end
+
+      input.subscribe(bit.bor(JTYPE_MOVEMENT, JTYPE_BUTTON, JTYPE_FEEDBACK), self.surface, 0, function(Surface, Msg)
+         if (Msg.type == JET_ENTERED_SURFACE) then
+            self.cursorX = Msg.x
+            self.cursorY = Msg.y
+            checkCursorImage()
+         elseif (Msg.type == JET_LEFT_SURFACE) then
+            checkCursorImage()
+            hoverUpdate(nil)
+         elseif Msg.type == JET_BUTTON_1 then
+            if Msg.value == 1 then
+               self.clickAbsX = Msg.absX
+               self.clickAbsY = Msg.absY
+               self.clickX = Msg.x
+               self.clickY = Msg.y
+            end
+
+            if lActiveZone then
+               if lActiveZone.clickRelease then
+                  lActiveZone.clickRelease(Msg.x, Msg.y, Msg.absX, Msg.absY)
+               end
+               lActiveZone = nil
+               cursorRefresh()
+               return
+            end
+
+            if self.hoveredItem and self.hoveredItem.click then
+               if self.hoveredItem.click(Msg) then
+                  return
+               end
+            end
+
+            if Msg.value == 1 and lHighlightTag then
+               if lHighlightTag._selected then
+                  lHighlightTag._selected = nil
+                  lSelectedTag = nil
+                  reportItemDeselected('user', lHighlightTag)
+               else
+                  lHighlightTag._selected = true
+                  lSelectedTag = lHighlightTag
+                  reportItemSelected('user', lHighlightTag)
+               end
+               rebuild()
+               self.surface.acDraw()
+            end
+         elseif (Msg.type == JET_ABS_X) or (Msg.type == JET_ABS_Y) then
+            if lActiveZone and lActiveZone.clickMove then
+               lActiveZone.clickMove(Msg)
+            end
+            self.cursorX = Msg.x
+            self.cursorY = Msg.y
+            self.cursorAbsX = Msg.absX
+            self.cursorAbsY = Msg.absY
+            cursorRefresh()
+         end
+      end)
+
+      if Options.items then
+         loadItems(Options.items)
+      end
+
+      if Options.columns then
+         self.setColumns(Options.columns)
+      end
+
+      initVectorScene()
+   end,
+   function(Exception)
+      error('Failed to initialise View: ' .. Exception.message)
+   end)
+
+   return self
+end
