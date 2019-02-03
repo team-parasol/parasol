@@ -152,7 +152,7 @@ gui.view = function(Options)
    local lCounter = 1
    local lActiveZone
 
-   local rebuild, cursorRefresh, hoverUpdate -- Forward declared functions
+   local rebuild, cursorRefresh -- Forward declared functions
 
    local function counter()
       lCounter = lCounter + 1
@@ -179,8 +179,9 @@ gui.view = function(Options)
 
    -- Reasons for change:
    --
+   --   clear:     All items in the view were removed.
    --   inverted:  Item automatically deselected due to an invert operation.
-   --   moved:     The item has been deselected due to a movement operation.
+   --   moved:     The item has been deselected due to moving position.
    --   user:      Selected by user interaction (click or keypress)
    --   manual:    Item was manually selected (by the application, not the user).
 
@@ -616,6 +617,8 @@ gui.view = function(Options)
                item._col[attrib].text.fill =  'url(#' .. col.vecGradientName .. ')' -- gui.rgbToSVG({ r=base.r, g=base.g, b=base.b, a=base.a*alpha })
             end
 
+            -- Item click and hover management
+
             table.insert(self.zones, {
                x      = item._x,
                y      = item._y,
@@ -623,16 +626,16 @@ gui.view = function(Options)
                height = item._height,
                hoverCallback = function(Zone, X, Y)
                   if item != lHighlightTag then
-                     hoverUpdate(item)
+                     lHighlightTag = item
+                     rebuild()
+                     self.surface.acDraw()
                   end
 
                   self.hoveredItem = {
                      click = function(Input)
                         if Input.value == 0 and bit.band(Input.flags, JTYPE_DBL_CLICK) != 0 then
-                           print('ACTIVATED')
+                           reportItemActivated('user', item)
                         end
-
-                        print('Hovered ', item)
                      end
                   }
                end
@@ -987,15 +990,8 @@ gui.view = function(Options)
       rebuild()
    end
 
-   hoverUpdate = function(Item) // Highlight items that the user hovers over.
-      if lHighlightTag == Item then return end
-      lHighlightTag = Item
-      rebuild()
-      self.surface.acDraw()
-   end
-
    cursorRefresh = function()
-      local item, cursor
+      local cursor
 
       if not lActiveZone then
          if self.cursorX then
@@ -1361,7 +1357,11 @@ gui.view = function(Options)
             checkCursorImage()
          elseif (Msg.type == JET_LEFT_SURFACE) then
             checkCursorImage()
-            hoverUpdate(nil)
+            if lHighlightTag then
+               lHighlightTag = nil
+               rebuild()
+               self.surface.acDraw()
+            end
          elseif Msg.type == JET_BUTTON_1 then
             if Msg.value == 1 then
                self.clickAbsX = Msg.absX
