@@ -1245,14 +1245,45 @@ gui.view = function(Options)
 
       if type(Column) == 'table' then
          -- NB: Attrib values that evaluate to nil are not permitted/supported.
-         local attrib = Column['attrib']
-         table.sort(lItems, function(a,b)
-            if Ascending then
-               return a[attrib] < b[attrib]
+
+         if #self.items > 0 then
+            local attrib = Column['attrib']
+            if type(self.items[1][attrib]) == 'table' then
+               if self.items[1][attrib]['sort'] then
+                  table.sort(self.items, function(a,b)
+                     if Ascending then
+                        return a[attrib].sort < b[attrib].sort
+                     else
+                        return a[attrib].sort > b[attrib].sort
+                     end
+                  end)
+               else
+                  table.sort(self.items, function(a,b)
+                     if Ascending then
+                        return a[attrib].value < b[attrib].value
+                     else
+                        return a[attrib].value > b[attrib].value
+                     end
+                  end)
+               end
+            elseif type(self.items[1][attrib]) == 'string' then
+               table.sort(self.items, function(a,b)
+                  if Ascending then
+                     return a[attrib]:lower() < b[attrib]:lower()
+                  else
+                     return a[attrib]:lower() > b[attrib]:lower()
+                  end
+               end)
             else
-               return a[attrib] >= b[attrib]
+               table.sort(self.items, function(a,b)
+                  if Ascending then
+                     return a[attrib] < b[attrib]
+                  else
+                     return a[attrib] > b[attrib]
+                  end
+               end)
             end
-         end)
+         end
 
          rebuild()
          self.surface.acDraw()
