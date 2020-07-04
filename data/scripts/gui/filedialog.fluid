@@ -39,6 +39,7 @@ Valid options to use when creating the dialog are as follows:
    require 'gui/fileview'
    require 'gui/toolbar'
    require 'gui/box'
+   require 'gui/view'
    include 'widget'
 
    if (gui == nil) then gui = { } end
@@ -304,17 +305,18 @@ gui.dialog.file = function(Options)
          yOffset = footer
       })
 
-      local viewFlags = nil
-      if nz(lOptions.multiSelect) then
-         viewFlags = '!MultiSelect'
-      end
-
-      lView = viewRegion.new('view', {
-         flags    = viewFlags .. '|DragDrop',
-         template = 'fileview',
-         style    = 'column',
-         selectCallback = function(View, Flags, Tag)
-            // Display the selected item in the file text box.
+      lFileView = gui.fileview({
+         target   = viewRegion,
+         path     = lOptions.path,
+         filter   = '*',
+         sysKeys  = true,
+         fileSelected = sendFeedback,
+         pathChanged = function(Path)
+            self.currentPath = Path
+            lPathBox.string = self.currentPath
+         end,
+         itemSelected = function(View, Reason, Item)
+            -- Print the name of the selected item in the file text box.
 
             if lFileView == nil then return end
 
@@ -345,17 +347,6 @@ gui.dialog.file = function(Options)
          end
       })
 
-      lFileView = gui.fileview(lView, {
-         path     = lOptions.path,
-         filter   = '*',
-         sysKeys  = true,
-         fileSelected = sendFeedback,
-         pathChanged = function(Path)
-            self.currentPath = Path
-            lPathBox.string = self.currentPath
-         end
-      })
-
       self.currentPath = lFileView.path
 
       glTabFocus.mtAddObject(lPathBox)
@@ -365,7 +356,6 @@ gui.dialog.file = function(Options)
       glTabFocus.mtAddObject(lOkayButton)
       glTabFocus.mtAddObject(lCancelButton)
 
-      lView.acShow()
       viewRegion.acShow()
 
       lWindow.acMoveToFront()
